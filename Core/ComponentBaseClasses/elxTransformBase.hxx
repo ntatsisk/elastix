@@ -25,6 +25,7 @@
 #include "itkTransformixInputPointFileReader.h"
 #include <itksys/SystemTools.hxx>
 #include "itkVector.h"
+#include "itkTransformFactoryBase.h"
 #include "itkTransformToDisplacementFieldFilter.h"
 #include "itkTransformToDeterminantOfSpatialJacobianSource.h"
 #include "itkTransformToSpatialJacobianSource.h"
@@ -35,9 +36,11 @@
 #include "itkMesh.h"
 #include "itkMeshFileReader.h"
 #include "itkMeshFileWriter.h"
+#include "itkTransformFileWriter.h"
 #include "itkTransformMeshFilter.h"
 #include "itkCommonEnums.h"
 
+#include <cassert>
 #include <fstream>
 #include <iomanip> // For setprecision.
 
@@ -650,6 +653,78 @@ TransformBase<TElastix>::WriteToFile(const ParametersType & param) const
         transparOutput << param[i] << " ";
       }
       transparOutput << param[nrP - 1] << ")" << std::endl;
+    }
+  }
+
+  const auto transformOutputFileNameExtensions =
+    this->m_Configuration->GetValuesOfParameter("TransformOutputFileNameExtensions");
+
+  if (!transformOutputFileNameExtensions.empty())
+  {
+    elxout << "WARNING: Support for the parameter TransformOutputFileNameExtensions is still experimental!\n"
+      "Transform files stored by this feature may still be incomplete or incorrect!"<< std::endl;  
+
+    // Initialize the factory.
+    itk::TransformFactoryBase::GetFactory();
+
+    const auto transformObject = [this]() -> itk::Object::ConstPointer {
+      const auto thisAsITKBase = this->GetAsITKBaseType();
+      assert(thisAsITKBase != nullptr);
+
+      // The string returned by elxGetClassName() corresponds to ITK's GetNameOfClass(),
+      // for AffineTransform, BSplineTransform, and TranslationTransform.
+      // Note that for EulerTransform and SimilarityTransform, ITK has "2D"
+      // or "3D" inserted in the class name.
+      // For other transforms, the correspondence between elastix and ITK class names
+      // appears less obvious.
+
+      const std::string elxClassName = this->elxGetClassName();
+      const std::string transformSubstring = "Transform";
+      const auto transformSubstringPosition = elxClassName.find(transformSubstring);
+
+      if (transformSubstringPosition != std::string::npos)
+      {
+        const auto substr = elxClassName.substr(0, transformSubstringPosition);
+        const auto instanceName = (((substr == "Euler") || (substr == "Similarity"))
+                                     ? (substr + std::to_string(FixedImageDimension) + 'D' + transformSubstring)
+                                     : elxClassName) +
+                                  "_double_" + std::to_string(FixedImageDimension) + '_' +
+                                  std::to_string(MovingImageDimension);
+        const auto instance = itk::ObjectFactoryBase::CreateInstance(instanceName.c_str());
+        const auto correspondingItkTransform =
+          dynamic_cast<itk::TransformBaseTemplate<CoordRepType> *>(instance.GetPointer());
+
+        if (correspondingItkTransform != nullptr)
+        {
+          correspondingItkTransform->SetParameters(thisAsITKBase->GetParameters());
+          correspondingItkTransform->SetFixedParameters(thisAsITKBase->GetFixedParameters());
+          return correspondingItkTransform;
+        }
+      }
+      return thisAsITKBase;
+    }();
+
+    const auto fileNameWithoutExtension =
+      std::string(m_TransformParametersFileName, 0, m_TransformParametersFileName.rfind('.')) + "-experimental";
+
+    for (const auto & fileNameExtension : transformOutputFileNameExtensions)
+    {
+      if (!fileNameExtension.empty())
+      {
+        const auto fileName = fileNameWithoutExtension + fileNameExtension;
+        try
+        {
+          const auto writer = itk::TransformFileWriter::New();
+
+          writer->SetInput(transformObject);
+          writer->SetFileName(fileName);
+          writer->Update();
+        }
+        catch (const std::exception& stdException)
+        {
+          xl::xout["error"] << "Error trying to write " << fileName << ":\n" << stdException.what() << std::endl;
+        }
+      }
     }
   }
 
